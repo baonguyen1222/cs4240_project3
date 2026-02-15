@@ -1,1 +1,1 @@
-# CS 4240 Compilers and Interpreters (Fall 2025) Project 1
+# CS 4240 Compilers and Interpreters (Spring 2026) Project 2
