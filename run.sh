@@ -4,3 +4,4 @@
 # This script should take 2 command line arguments: a path to 
 # the input ir file and a path where the output ir file should
 # be created.
+java -cp materials/src IROptimizer "$1" "$2"
