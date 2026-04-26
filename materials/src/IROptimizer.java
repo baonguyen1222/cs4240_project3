@@ -1,10 +1,11 @@
 import ir.*;
 import ir.operand.*;
 import java.util.*;
-import java.io.FileOutputStream;
-import java.io.PrintStream;
 
 public class IROptimizer {
+
+    private Map<IRInstruction, Integer> instToId = new HashMap<>();
+    private Map<Integer, IRInstruction> idToInst = new HashMap<>();
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
@@ -12,29 +13,39 @@ public class IROptimizer {
             return;
         }
 
-        // 1. Read the IR Program
         IRReader reader = new IRReader();
         IRProgram program = reader.parseIRFile(args[0]);
 
-        // 2. Process each function
         for (IRFunction function : program.functions) {
             IROptimizer optimizer = new IROptimizer();
-    
-            // Step 1: Map instructions to IDs
-            optimizer.mapInstructions(function);
-            
-            // Step 2: Build the CFG
-            List<BasicBlock> blocks = optimizer.splitBlocks(function);
-            
-            // Step 3: Solve Dataflow
-            optimizer.computeGenKill(blocks, function);
-            optimizer.solveDataflow(blocks, function.instructions.size());
-            
-            // Step 4: Final Deletion (We will write this method next)
-            optimizer.removeDeadCode(function, blocks);
+
+            boolean changed = true;
+            while (changed) {
+                String before = function.instructions.toString();
+
+                // assign IDs to instructions for dataflow tracking
+                optimizer.mapInstructions(function);
+
+                // break function into basic blocks (CFG nodes)
+                List<BasicBlock> blocks = optimizer.splitBlocks(function);
+
+                // compute GEN/KILL sets for reaching definitions
+                optimizer.computeGenKill(blocks, function);
+
+                // solve dataflow equations (IN/OUT sets)
+                optimizer.solveDataflow(blocks, function.instructions.size());
+
+                // replace variables using simple copy propagation
+                optimizer.copyPropagate(blocks);
+
+                // remove instructions that don't affect program output
+                optimizer.removeDeadCode_reachingDefs(function, blocks);
+
+                String after = function.instructions.toString();
+                changed = !before.equals(after); // stop when stable
+            }
         }
 
-        // 3. Write the optimized program to the output file
         java.io.FileOutputStream fos = new java.io.FileOutputStream(args[1]);
         java.io.PrintStream ps = new java.io.PrintStream(fos);
         IRPrinter printer = new IRPrinter(ps);
@@ -43,70 +54,69 @@ public class IROptimizer {
 
     public List<BasicBlock> splitBlocks(IRFunction function) {
         List<BasicBlock> blocks = new ArrayList<>();
-        // Temporary map to find blocks by their label names later
         Map<String, BasicBlock> labelMap = new HashMap<>();
-        
-        BasicBlock currentBlock = new BasicBlock();
-        blocks.add(currentBlock);
+
+        BasicBlock cur = new BasicBlock();
+        blocks.add(cur);
 
         for (IRInstruction inst : function.instructions) {
-            // Rule 2: Labels start a new block
+            // labels start a new basic block
             if (inst.opCode == IRInstruction.OpCode.LABEL) {
-                if (!currentBlock.instructions.isEmpty()) {
-                    currentBlock = new BasicBlock();
-                    blocks.add(currentBlock);
+                if (!cur.instructions.isEmpty()) {
+                    cur = new BasicBlock();
+                    blocks.add(cur);
                 }
-                String labelName = ((IRLabelOperand) inst.operands[0]).getName();
-                labelMap.put(labelName, currentBlock);
+
+                String label = ((IRLabelOperand) inst.operands[0]).getName();
+                labelMap.put(label, cur);// map label → block
             }
 
-            currentBlock.addInstruction(inst);
+            cur.addInstruction(inst);
 
-            // Rule 3: Control flow ends a block
-            if (isControlFlow(inst)) {
-                currentBlock = new BasicBlock();
-                blocks.add(currentBlock);
+            if (isControlFlow(inst)) { // control flow ends the current block
+                cur = new BasicBlock();
+                blocks.add(cur);
             }
         }
-        
-        // Remove any accidental empty blocks at the end
-        blocks.removeIf(b -> b.instructions.isEmpty());
-        
+
+        blocks.removeIf(b -> b.instructions.isEmpty()); // remove any empty blocks created accidentally
         return linkBlocks(blocks, labelMap);
     }
 
     private boolean isControlFlow(IRInstruction inst) {
         IRInstruction.OpCode op = inst.opCode;
-        return op == IRInstruction.OpCode.GOTO || 
-            op == IRInstruction.OpCode.RETURN || 
-            op.name().startsWith("BR");
+        return op == IRInstruction.OpCode.GOTO
+            || op == IRInstruction.OpCode.RETURN
+            || op.name().startsWith("BR");
     }
 
     private List<BasicBlock> linkBlocks(List<BasicBlock> blocks, Map<String, BasicBlock> labelMap) {
         for (int i = 0; i < blocks.size(); i++) {
-            BasicBlock b = blocks.get(i);
-            IRInstruction last = b.instructions.get(b.instructions.size() - 1);
+            BasicBlock block = blocks.get(i);
+            IRInstruction last = block.instructions.get(block.instructions.size() - 1); // connect blocks based on last instruction
 
             if (last.opCode == IRInstruction.OpCode.GOTO) {
-                // One successor: the target label
                 String target = ((IRLabelOperand) last.operands[0]).getName();
-                addEdge(b, labelMap.get(target));
+                // jump to label
+                addEdge(block, labelMap.get(target));
+
             } else if (last.opCode.name().startsWith("BR")) {
-                // Two successors: the target label AND the next sequential block
                 String target = ((IRLabelOperand) last.operands[0]).getName();
-                addEdge(b, labelMap.get(target));
+                addEdge(block, labelMap.get(target));
+
                 if (i + 1 < blocks.size()) {
-                    addEdge(b, blocks.get(i + 1));
+                    addEdge(block, blocks.get(i + 1));
                 }
+
             } else if (last.opCode == IRInstruction.OpCode.RETURN) {
-                // No successors within this function
+                // no successor
             } else {
-                // Fall-through: just the next sequential block
                 if (i + 1 < blocks.size()) {
-                    addEdge(b, blocks.get(i + 1));
+                    addEdge(block, blocks.get(i + 1));
                 }
             }
         }
+
         return blocks;
     }
 
@@ -117,12 +127,11 @@ public class IROptimizer {
         }
     }
 
-    private Map<IRInstruction, Integer> instToId = new HashMap<>();
-    private Map<Integer, IRInstruction> idToInst = new HashMap<>();
-
     private void mapInstructions(IRFunction function) {
+    // assign each instruction a unique ID
         instToId.clear();
         idToInst.clear();
+
         int id = 0;
         for (IRInstruction inst : function.instructions) {
             instToId.put(inst, id);
@@ -131,31 +140,34 @@ public class IROptimizer {
         }
     }
 
+    // compute GEN/KILL per block
     public void computeGenKill(List<BasicBlock> blocks, IRFunction function) {
-        for (BasicBlock b : blocks) {
-            b.gen.clear();
-            b.kill.clear();
-            
-            // Track definitions within the block to handle local overrides
-            Map<String, Integer> lastDefInBlock = new HashMap<>();
+        for (BasicBlock block : blocks) {
+            block.gen.clear();
+            block.kill.clear();
 
-            for (IRInstruction inst : b.instructions) {
+            Map<String, Integer> lastDef = new HashMap<>();
+
+            for (IRInstruction inst : block.instructions) {
                 int instId = instToId.get(inst);
                 String dst = getDestVar(inst);
 
                 if (dst != null) {
-                    // GEN logic: Add this def, and remove any previous defs of the same var in this block
-                    b.gen.set(instId);
-                    if (lastDefInBlock.containsKey(dst)) {
-                        b.gen.clear(lastDefInBlock.get(dst));
-                    }
-                    lastDefInBlock.put(dst, instId);
+                    block.gen.set(instId); // this instruction generates a def
 
-                    // KILL logic: Any other instruction in the function that defines 'dst' is killed
-                    for (IRInstruction otherInst : function.instructions) {
-                        int otherId = instToId.get(otherInst);
-                        if (otherId != instId && dst.equals(getDestVar(otherInst))) {
-                            b.kill.set(otherId);
+                    // remove previous def of same var in this block
+                    if (lastDef.containsKey(dst)) {
+                        block.gen.clear(lastDef.get(dst));
+                    }
+                    lastDef.put(dst, instId);
+
+                    // kill all other defs of this variable in function
+                    for (IRInstruction other : function.instructions) {
+                        int otherId = instToId.get(other);
+                        String otherDst = getDestVar(other);
+
+                        if (otherId != instId && dst.equals(otherDst)) {
+                            block.kill.set(otherId);
                         }
                     }
                 }
@@ -163,131 +175,347 @@ public class IROptimizer {
         }
     }
 
-    // Helper to identify which variable an instruction defines
     private String getDestVar(IRInstruction inst) {
         switch (inst.opCode) {
             case ASSIGN:
-                // Check if it's a scalar assignment (not array assignment)
-                if (inst.operands.length == 2 && inst.operands[0] instanceof IRVariableOperand)
+                if (inst.operands.length == 2 && inst.operands[0] instanceof IRVariableOperand) {
                     return ((IRVariableOperand) inst.operands[0]).getName();
+                }
                 break;
-            case ADD: case SUB: case MULT: case DIV: case AND: case OR:
+
+            case ADD:
+            case SUB:
+            case MULT:
+            case DIV:
+            case AND:
+            case OR:
             case ARRAY_LOAD:
             case CALLR:
                 return ((IRVariableOperand) inst.operands[0]).getName();
+
             default:
                 return null;
         }
+
         return null;
     }
 
+    // initialize OUT = GEN
     public void solveDataflow(List<BasicBlock> blocks, int totalInsts) {
-        // Initialize OUT = GEN for all blocks
-        for (BasicBlock b : blocks) {
-            b.out = (BitSet) b.gen.clone();
+        for (BasicBlock block : blocks) {
+            block.out = (BitSet) block.gen.clone();
         }
 
         boolean changed = true;
         while (changed) {
             changed = false;
-            for (BasicBlock b : blocks) {
-                // IN[B] = Union of OUT[P] for all predecessors P
-                b.in.clear();
-                for (BasicBlock pred : b.predecessors) {
-                    b.in.or(pred.out);
+
+            for (BasicBlock block : blocks) {
+                block.in.clear();
+                for (BasicBlock pred : block.predecessors) {
+                    block.in.or(pred.out);
                 }
 
-                // OUT[B] = GEN[B] U (IN[B] - KILL[B])
-                BitSet oldOut = (BitSet) b.out.clone();
-                BitSet survivor = (BitSet) b.in.clone();
-                survivor.andNot(b.kill);
-                
-                b.out = (BitSet) b.gen.clone();
-                b.out.or(survivor);
+                BitSet oldOut = (BitSet) block.out.clone();
+                BitSet survivors = (BitSet) block.in.clone();
+                survivors.andNot(block.kill);
 
-                if (!b.out.equals(oldOut)) {
+                block.out = (BitSet) block.gen.clone();
+                block.out.or(survivors);
+
+                if (!block.out.equals(oldOut)) {
                     changed = true;
                 }
             }
         }
     }
 
-    public void removeDeadCode(IRFunction function, List<BasicBlock> blocks) {
-        ArrayList<IRInstruction> optimizedList = new ArrayList<>();
+    public void removeDeadCode_reachingDefs(IRFunction function, List<BasicBlock> blocks) {
+        List<IRInstruction> insts = function.instructions;
+        Map<IRInstruction, BitSet> rdIn = computeInstr_reachingDefs(function);
 
-        for (BasicBlock b : blocks) {
-            for (IRInstruction inst : b.instructions) {
-                String dst = getDestVar(inst);
-                int instId = instToId.get(inst);
+        Set<IRInstruction> marked = new HashSet<>();
+        Deque<IRInstruction> work = new ArrayDeque<>();
 
-                // Logic: If it defines a variable, check if that definition is used anywhere
-                if (dst != null && !isSideEffect(inst)) {
-                    if (isDead(instId, dst, b, blocks)) {
-                        continue; // Skip adding this instruction (it's dead!)
-                    }
-                }
-                optimizedList.add(inst);
+        // start from critical instructions
+        for (IRInstruction inst : insts) {
+            if (isCritical(inst)) {
+                marked.add(inst);
+                work.add(inst);
             }
         }
-        function.instructions = optimizedList;
-    }
 
-    private boolean isSideEffect(IRInstruction inst) {
-        // Never delete ANY function call, as they may have side effects (I/O, global state)
-        if (inst.opCode == IRInstruction.OpCode.CALL || inst.opCode == IRInstruction.OpCode.CALLR) {
-            return true; 
-        }
-        // Never delete array stores or control flow
-        return inst.opCode == IRInstruction.OpCode.ARRAY_STORE || isControlFlow(inst);
-    }
-
-    private boolean isDead(int instId, String varName, BasicBlock block, List<BasicBlock> allBlocks) {
-        // 1. Check if the variable is used later in the SAME block
-        boolean usedInBlock = false;
-        boolean foundInst = false;
-        for (IRInstruction inst : block.instructions) {
-            if (!foundInst) {
-                if (instToId.get(inst) == instId) foundInst = true;
+        // walk backwards
+        while (!work.isEmpty()) {
+            IRInstruction inst = work.removeFirst();
+            Set<String> used = getUsed(inst);
+            BitSet reaching = rdIn.get(inst);
+            if (reaching == null) {
                 continue;
             }
-            // If we find a use of the variable before another definition, it's NOT dead
-            if (usesVariable(inst, varName)) return false;
-            if (varName.equals(getDestVar(inst))) break; // Overwritten
-        }
 
-        // 2. Check if the definition reaches the end of the block (OUT set)
-        // AND if any successor blocks might use it.
-        if (!block.out.get(instId)) {
-            return true; // Doesn't even make it out of the block
-        }
+            for (String var : used) {
+                for (int defId = reaching.nextSetBit(0); defId >= 0; defId = reaching.nextSetBit(defId + 1)) {
+                    IRInstruction defInst = idToInst.get(defId);
+                    if (defInst == null) {
+                        continue;
+                    }
 
-        // 3. Global Check: Does this definition reach ANY instruction that uses it?
-        // For a 100% score, we assume that if it's in the OUT set, it might be live, 
-        // unless you implement a full Liveness Analysis (which is the reverse of Reaching Defs).
-        // For now, if it reaches the OUT set, we'll play it safe and keep it.
-        return false; 
-    }
-
-    private boolean usesVariable(IRInstruction inst, String varName) {
-        for (IROperand op : inst.operands) {
-            if (op instanceof IRVariableOperand) {
-                if (((IRVariableOperand) op).getName().equals(varName)) {
-                    // Important: The first operand of an assignment is the DESTINATION, not a USE
-                    if (inst.opCode == IRInstruction.OpCode.ASSIGN && op == inst.operands[0]) continue;
-                    // For other ops like ADD, operands[0] is usually the destination too
-                    if (isComputation(inst.opCode) && op == inst.operands[0]) continue;
-                    
-                    return true;
+                    String dst = getDestVar(defInst);
+                    if (var.equals(dst) && !marked.contains(defInst)) {
+                        marked.add(defInst);
+                        work.add(defInst);
+                    }
                 }
             }
         }
-        return false;
+
+        List<IRInstruction> kept = new ArrayList<>();
+        for (IRInstruction inst : insts) {
+            String dst = getDestVar(inst);
+
+            if (marked.contains(inst) || dst == null || isCritical(inst)) {
+                kept.add(inst);
+            }
+        }
+
+        function.instructions = kept;
     }
 
-    private boolean isComputation(IRInstruction.OpCode op) {
-        return op == IRInstruction.OpCode.ADD || op == IRInstruction.OpCode.SUB || 
-            op == IRInstruction.OpCode.MULT || op == IRInstruction.OpCode.DIV || 
-            op == IRInstruction.OpCode.AND || op == IRInstruction.OpCode.OR || 
-            op == IRInstruction.OpCode.ARRAY_LOAD;
+    private Map<IRInstruction, BitSet> computeInstr_reachingDefs(IRFunction function) {
+        List<IRInstruction> insts = function.instructions;
+        int n = insts.size();
+
+        Map<IRInstruction, BitSet> inMap = new HashMap<>();
+        Map<IRInstruction, BitSet> outMap = new HashMap<>();
+        Map<String, Set<Integer>> defsByVar = new HashMap<>();
+
+        // collect all definitions for each variable
+        for (IRInstruction inst : insts) {
+            String dst = getDestVar(inst);
+            if (dst != null) {
+                defsByVar.computeIfAbsent(dst, k -> new HashSet<>()).add(instToId.get(inst));
+            }
+        }
+        // get instruction-level predecessors
+        Map<IRInstruction, List<IRInstruction>> preds = buildInstrPreds(function);
+        // initialize IN and OUT sets
+        for (IRInstruction inst : insts) {
+            inMap.put(inst, new BitSet(n));
+
+            BitSet out = new BitSet(n);
+            String dst = getDestVar(inst);
+            if (dst != null) {
+                out.set(instToId.get(inst));
+            }
+            outMap.put(inst, out);
+        }
+        // solve reaching definitions until nothing changes
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+
+            for (IRInstruction inst : insts) {
+                BitSet newIn = new BitSet(n);
+                // IN = union of predecessors' OUT
+                for (IRInstruction pred : preds.getOrDefault(inst, Collections.emptyList())) {
+                    newIn.or(outMap.get(pred));
+                }
+
+                BitSet newOut = (BitSet) newIn.clone();
+                String dst = getDestVar(inst);
+
+                if (dst != null) {
+                    // kill older defs of the same variable
+                    Set<Integer> oldDefs = defsByVar.getOrDefault(dst, Collections.emptySet());
+                    for (int id : oldDefs) {
+                        newOut.clear(id);
+                    }
+                    // add current definition
+                    newOut.set(instToId.get(inst));
+                }
+
+                if (!newIn.equals(inMap.get(inst)) || !newOut.equals(outMap.get(inst))) {
+                    inMap.put(inst, newIn);
+                    outMap.put(inst, newOut);
+                    changed = true;
+                }
+            }
+        }
+
+        return inMap;
+    }
+
+    private Map<IRInstruction, List<IRInstruction>> buildInstrPreds(IRFunction function) {
+        List<IRInstruction> insts = function.instructions;
+        Map<IRInstruction, List<IRInstruction>> preds = new HashMap<>();
+        Map<String, IRInstruction> labelToInst = new HashMap<>();
+
+        // set up predecessor lists and record labels
+        for (IRInstruction inst : insts) {
+            preds.put(inst, new ArrayList<>());
+
+            if (inst.opCode == IRInstruction.OpCode.LABEL) {
+                String label = ((IRLabelOperand) inst.operands[0]).getName();
+                labelToInst.put(label, inst);
+            }
+        }
+
+        for (int i = 0; i < insts.size(); i++) {
+            IRInstruction inst = insts.get(i);
+
+            if (inst.opCode == IRInstruction.OpCode.GOTO) {          // goto only goes to its target label
+                String target = ((IRLabelOperand) inst.operands[0]).getName();
+                IRInstruction targetInst = labelToInst.get(target);
+                if (targetInst != null) {
+                    preds.get(targetInst).add(inst);
+                }
+
+            } else if (inst.opCode.name().startsWith("BR")) {        // branch can go to target or fall through
+                String target = ((IRLabelOperand) inst.operands[0]).getName();
+                IRInstruction targetInst = labelToInst.get(target);
+                if (targetInst != null) {
+                    preds.get(targetInst).add(inst);
+                }
+
+                if (i + 1 < insts.size()) {
+                    preds.get(insts.get(i + 1)).add(inst);
+                }
+
+            } else if (inst.opCode != IRInstruction.OpCode.RETURN) {    // normal instruction falls through to next one
+                if (i + 1 < insts.size()) {
+                    preds.get(insts.get(i + 1)).add(inst);
+                }
+            }
+        }
+
+        return preds;
+    }
+
+    private boolean isCritical(IRInstruction inst) { // these instructions must be kept
+        return inst.opCode == IRInstruction.OpCode.CALL
+            || inst.opCode == IRInstruction.OpCode.CALLR
+            || inst.opCode == IRInstruction.OpCode.RETURN
+            || inst.opCode == IRInstruction.OpCode.ARRAY_STORE
+            || inst.opCode == IRInstruction.OpCode.LABEL
+            || inst.opCode == IRInstruction.OpCode.GOTO
+            || inst.opCode.name().startsWith("BR");
+    }
+
+    private Set<String> getUsed(IRInstruction inst) {
+        Set<String> used = new HashSet<>();
+        int start = 0;
+        // skip dest
+        switch (inst.opCode) {
+            case ASSIGN:
+            case ADD:
+            case SUB:
+            case MULT:
+            case DIV:
+            case AND:
+            case OR:
+            case ARRAY_LOAD:
+            case CALLR:
+                start = 1;
+                break;
+            default:
+                start = 0;
+        }
+        // collect variable operands
+        for (int i = start; i < inst.operands.length; i++) {
+            IROperand op = inst.operands[i];
+            if (op instanceof IRVariableOperand) {
+                used.add(((IRVariableOperand) op).getName());
+            }
+        }
+
+        return used;
+    }
+
+    public void copyPropagate(List<BasicBlock> blocks) {
+        for (BasicBlock block : blocks) {
+            Map<String, String> copies = new HashMap<>();
+
+            for (IRInstruction inst : block.instructions) {
+                replaceUsed(inst, copies);  // replace uses with known copies first
+
+                String dst = getDestVar(inst);
+                if (dst != null) {  // old map
+                    copies.remove(dst);
+                    removeMappingUse(copies, dst);
+                    removeMappingDefine(copies, dst);
+                }
+
+                if (inst.opCode == IRInstruction.OpCode.ASSIGN
+                        && inst.operands.length == 2
+                        && inst.operands[0] instanceof IRVariableOperand
+                        && inst.operands[1] instanceof IRVariableOperand) {
+
+                    String dstVar = ((IRVariableOperand) inst.operands[0]).getName();
+                    String srcVar = ((IRVariableOperand) inst.operands[1]).getName();
+
+                    while (copies.containsKey(srcVar)) {
+                        srcVar = copies.get(srcVar);
+                    }
+
+                    copies.put(dstVar, srcVar);
+                }
+
+                if (inst.opCode == IRInstruction.OpCode.CALL
+                        || inst.opCode == IRInstruction.OpCode.CALLR) {
+                    copies.clear();
+                }
+            }
+        }
+    }
+
+    private void replaceUsed(IRInstruction inst, Map<String, String> copies) {
+        int start = 0;
+        // skip dest
+        switch (inst.opCode) {
+            case ASSIGN:
+            case ADD:
+            case SUB:
+            case MULT:
+            case DIV:
+            case AND:
+            case OR:
+            case ARRAY_LOAD:
+            case CALLR:
+                start = 1;
+                break;
+            default:
+                start = 0;
+        }
+
+        for (int i = start; i < inst.operands.length; i++) { // replace used vars
+            IROperand op = inst.operands[i];
+            if (op instanceof IRVariableOperand) {
+                IRVariableOperand var = (IRVariableOperand) op;
+                String name = var.getName();
+
+                if (copies.containsKey(name)) {
+                    inst.operands[i] = new IRVariableOperand(var.type, copies.get(name), inst);
+                }
+            }
+        }
+    }
+
+    private void removeMappingUse(Map<String, String> copies, String var) {
+        List<String> remove = new ArrayList<>();
+
+        for (Map.Entry<String, String> entry : copies.entrySet()) { // remove map
+            if (entry.getValue().equals(var)) {
+                remove.add(entry.getKey());
+            }
+        }
+
+        for (String key : remove) {
+            copies.remove(key);
+        }
+    }
+
+    private void removeMappingDefine(Map<String, String> copies, String var) {
+        copies.remove(var); // remove direct mapping
     }
 }
