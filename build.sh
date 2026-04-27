@@ -5,7 +5,7 @@ mkdir -p bin
 
 # 2. Compile all files into the bin directory
 # Using the -d flag tells javac where to put the .class files
-javac -d bin materials/src/*.java materials/src/ir/*.java materials/src/ir/datatype/*.java materials/src/ir/operand/*.java
+javac -d bin $(find materials/src -name "*.java")
 
 if [ $? -eq 0 ]; then
     echo "Build Successful: Classes are in the 'bin' folder."

@@ -70,6 +70,10 @@ public class MipsBackend {
                     }
                 }
 
+                String endLabel = function.name + "_end";
+
+                out.println(endLabel + ":");
+
                 // function exit
                 if (function.name.equals("main")) {
                     out.println("  li $v0, 10");
@@ -147,27 +151,27 @@ public class MipsBackend {
             // branching
             case BREQ:
                 loadBranchOperands(inst);
-                out.println("  beq $t0, $t1, " + getLabel(inst));
+                out.println("  beq $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
                 break;
             
             case BRNEQ:
                 loadBranchOperands(inst);
-                out.println("  bne $t0, $t1, " + getLabel(inst));
+                out.println("  bne $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
                 break;
 
             case BRGT:
                 loadBranchOperands(inst);
-                out.println("  bgt $t0, $t1, " + getLabel(inst));
+                out.println("  bgt $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
                 break;
 
             case BRLT:
                 loadBranchOperands(inst);
-                out.println("  blt $t0, $t1, " + getLabel(inst));
+                out.println("  blt $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
                 break;
 
             case BRGEQ:
                 loadBranchOperands(inst);
-                out.println("  bge $t0, $t1, " + getLabel(inst));
+                out.println("  bge $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
                 break;
 
             // case BRLE:
@@ -177,11 +181,12 @@ public class MipsBackend {
             //     break;
 
             case LABEL:
-                out.println(((IRLabelOperand)inst.operands[0]).getName() + ":");
+                String label = ((IRLabelOperand)inst.operands[0]).getName();
+                out.println(currentFunctionReference.name + "_" + label + ":");
                 break;
 
             case GOTO:
-                String target = getLabel(inst);
+                String target = currentFunctionReference.name + "_" + getLabel(inst);
                 out.println("  j " + target);
                 break;
 
@@ -190,11 +195,8 @@ public class MipsBackend {
                 if (inst.operands.length > 0) {
                     loadOperand(inst.operands[0], "$v0");
                 }
-                int space = calculateStackSpace(currentFunctionReference); // or pass the variable
-                out.println("  lw $ra, " + (space - 4) + "($sp)"); 
-                out.println("  addi $sp, $sp, " + space);
-                out.println("  jr $ra");
-                break;
+                out.println("  j " + currentFunctionReference.name + "_end");
+                return;
 
             case CALL:
             case CALLR:
@@ -209,7 +211,23 @@ public class MipsBackend {
                     out.println("  li $v0, 11"); 
                     out.println("  syscall");
                 } else {
+                    int argCount = inst.operands.length - 1;
+
+                    for (int i = 0; i < argCount; i++) {
+                        if (i < 4) {
+                            loadOperand(inst.operands[i + 1], "$a" + i);
+                        } else {
+                            loadOperand(inst.operands[i + 1], "$t0");
+                            out.println("  addi $sp, $sp, -4");
+                            out.println("  sw $t0, 0($sp)");
+                        }
+                    }
+
+                    out.println("  addi $sp, $sp, -4");
+                    out.println("  sw $ra, 0($sp)");
                     out.println("  jal " + funcName);
+                    out.println("  lw $ra, 0($sp)");
+                    out.println("  addi $sp, $sp, 4");
                     if (inst.opCode == IRInstruction.OpCode.CALLR) {
                         storeResult(inst.operands[0], "$v0");
                     }
@@ -219,9 +237,9 @@ public class MipsBackend {
             // array access
             case ARRAY_STORE:
                 // array[index] = value
-                loadOperand(inst.operands[0], "$t0");   // array base
-                loadOperand(inst.operands[1], "$t1");   // index
-                loadOperand(inst.operands[2], "$t2");   // value
+                loadOperand(inst.operands[1], "$t0");   // array base
+                loadOperand(inst.operands[2], "$t1");   // index
+                loadOperand(inst.operands[0], "$t2");   // value
                 out.println("  sll $t1, $t1, 2");       // index * 4
                 out.println("  add $t0, $t0, $t1");     // base + offset
                 out.println("  sw $t2, 0($t0)");
@@ -279,10 +297,19 @@ public class MipsBackend {
             }
         }
         
-        // FIX 3: 4 bytes per var + 4 bytes for $ra + padding
-        // MIPS stack should be 8-byte aligned
-        int space = (vars.size() + 1) * 4;
-        return (space + 7) & ~7; // Round up to nearest multiple of 8
+        int space = 4; // for $ra
+
+        for (String var : vars) {
+            // TEMP: detect arrays (adjust if your IR stores size differently)
+            if (var.contains("[")) {
+                space += 400; // assume A[100]
+            } else {
+                space += 4;
+            }
+        }
+
+        // align to 8 bytes
+        return (space + 7) & ~7;
     }
 
     private void generateGreedyBlock(BasicBlock block) {
@@ -397,7 +424,11 @@ public class MipsBackend {
                     int argIndex = isCallR ? 2 : 1;
                     String val = getReg(inst.operands[argIndex], "$a0", regMap, true);
                     if (!val.equals("$a0")) out.println("  move $a0, " + val);
-                    out.println("  li $v0, 1"); 
+                    if (funcName.equals("putc")) {
+                        out.println("  li $v0, 11");
+                    } else {
+                        out.println("  li $v0, 1");
+                    }
                     out.println("  syscall");
                 } 
                 else {
@@ -451,9 +482,9 @@ public class MipsBackend {
 
             case ARRAY_STORE:
                 // IR typically looks like: array_store, base, index, value
-                String baseS = getReg(inst.operands[0], "$t0", regMap, true);
-                String idxS = getReg(inst.operands[1], "$t1", regMap, true);
-                String valS = getReg(inst.operands[2], "$t2", regMap, true);
+                String valS = getReg(inst.operands[0], "$t2", regMap, true);
+                String baseS = getReg(inst.operands[1], "$t0", regMap, true);
+                String idxS = getReg(inst.operands[2], "$t1", regMap, true);
                 
                 out.println("  sll $at, " + idxS + ", 2");
                 out.println("  add $at, " + baseS + ", $at");
@@ -568,12 +599,12 @@ public class MipsBackend {
 
     private void loadBranchOperands(IRInstruction inst) {
         // Always load the first operand into $t0
-        loadOperand(inst.operands[0], "$t0");
+        loadOperand(inst.operands[1], "$t0");
         
         // If there is a second variable before the label, load it into $t1
         // Otherwise, compare against zero
-        if (inst.operands.length > 2 && !(inst.operands[1] instanceof IRLabelOperand)) {
-            loadOperand(inst.operands[1], "$t1");
+        if (inst.operands.length > 2) {
+            loadOperand(inst.operands[2], "$t1");
         } else {
             out.println("  li $t1, 0");
         }

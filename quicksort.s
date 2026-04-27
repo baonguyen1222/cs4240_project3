@@ -109,12 +109,12 @@ quicksort_loop2:
   lw $t2, 36($sp)
   lw $t3, 12($sp)
   lw $t4, 16($sp)
-  sll $at, $t0, 2
-  add $at, $t1, $at
-  sw $t4, 0($at)
-  sll $at, $t0, 2
-  add $at, $t2, $at
-  sw $t3, 0($at)
+  sll $at, $t4, 2
+  add $at, $t0, $at
+  sw $t1, 0($at)
+  sll $at, $t3, 2
+  add $at, $t0, $at
+  sw $t2, 0($at)
   sw $t0, 0($sp)
   sw $t1, 28($sp)
   sw $t2, 36($sp)
@@ -170,6 +170,7 @@ quicksort_exit0:
   sw $t2, 40($sp)
   sw $t0, 16($sp)
 quicksort_end:
+quicksort_end:
   lw $ra, 44($sp)
   addi $sp, $sp, 48
   jr $ra
@@ -219,9 +220,9 @@ main_loop0:
   lw $t1, 0($sp)
   lw $t0, 8($sp)
   move $t1, $v0
-  sll $at, $t2, 2
-  add $at, $t1, $at
-  sw $t0, 0($at)
+  sll $at, $t0, 2
+  add $at, $t2, $at
+  sw $t1, 0($at)
   li $v1, 1
   add $t0, $t0, $v1
   sw $t2, 12($sp)
@@ -268,7 +269,7 @@ main_loop1:
   li $v0, 1
   syscall
   li $a0, 10
-  li $v0, 1
+  li $v0, 11
   syscall
   li $v1, 1
   add $t0, $t0, $v1
@@ -281,6 +282,7 @@ main_loop1:
   sw $t0, 8($sp)
 main_exit1:
 main_return:
+main_end:
   li $v0, 10
   syscall
 
