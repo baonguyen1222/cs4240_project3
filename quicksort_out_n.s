@@ -105,7 +105,7 @@ quicksort_exit0:
   lw $a2, 404($sp)
   jal quicksort
 quicksort_end:
-quicksort_end:
+quicksort_exit:
   lw $ra, 444($sp)
   addi $sp, $sp, 448
   jr $ra
@@ -114,7 +114,8 @@ main:
   sw $ra, 412($sp)
   li $t0, 0
   sw $t0, 0($sp)
-  jal geti
+  li $v0, 5
+  syscall
   sw $v0, 4($sp)
   lw $t0, 4($sp)
   li $t1, 100
@@ -129,9 +130,10 @@ main_loop0:
   lw $t0, 8($sp)
   lw $t1, 4($sp)
   bgt $t0, $t1, main_exit0
-  jal geti
+  li $v0, 5
+  syscall
   sw $v0, 0($sp)
-  lw $t0, 12($sp)
+  addiu $t0, $sp, 12
   lw $t1, 8($sp)
   lw $t2, 0($sp)
   sll $t1, $t1, 2
@@ -143,7 +145,7 @@ main_loop0:
   sw $t2, 8($sp)
   j main_loop0
 main_exit0:
-  lw $a0, 12($sp)
+  addiu $a0, $sp, 12
   li $a1, 0
   lw $a2, 4($sp)
   jal quicksort
@@ -153,7 +155,7 @@ main_loop1:
   lw $t0, 8($sp)
   lw $t1, 4($sp)
   bgt $t0, $t1, main_exit1
-  lw $t0, 12($sp)
+  addiu $t0, $sp, 12
   lw $t1, 8($sp)
   sll $t1, $t1, 2
   add $t0, $t0, $t1
@@ -163,7 +165,8 @@ main_loop1:
   li $v0, 1
   syscall
   li $a0, 10
-  jal putc
+  li $v0, 11
+  syscall
   lw $t0, 8($sp)
   li $t1, 1
   add $t2, $t0, $t1
@@ -171,7 +174,7 @@ main_loop1:
   j main_loop1
 main_exit1:
 main_return:
-main_end:
+main_exit:
   li $v0, 10
   syscall
 
