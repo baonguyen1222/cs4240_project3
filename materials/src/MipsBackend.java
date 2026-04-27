@@ -8,6 +8,8 @@ public class MipsBackend {
     private int currentStackOffset = 0;
     private PrintWriter out;
     private IRFunction currentFunctionReference;
+    private int currentStackSize;
+    private Set<String> arrayVars = new HashSet<>();
 
     public static void main(String[] args) throws Exception {
         if (args.length < 3) {
@@ -36,6 +38,7 @@ public class MipsBackend {
             for (IRFunction function : program.functions) {
                 // reset for each function
                 stackOffsets.clear();
+                arrayVars.clear();
                 currentFunctionReference = function;
                 currentStackOffset = 0;
                 
@@ -44,7 +47,8 @@ public class MipsBackend {
 
                 // preamble: calculate stack space needed
                 // naive: pre-scan to find all unique variables
-                int totalSpace = calculateStackSpace(function);
+                currentStackSize = calculateStackSpace(function);
+                int totalSpace = currentStackSize;
                 out.println("  addi $sp, $sp, -" + totalSpace);
                 out.println("  sw $ra, " + (totalSpace - 4) + "($sp)"); // Save Return Address
 
@@ -228,6 +232,11 @@ public class MipsBackend {
                     out.println("  jal " + funcName);
                     out.println("  lw $ra, 0($sp)");
                     out.println("  addi $sp, $sp, 4");
+                    
+                    if (argCount > 4) {
+                        out.println("  addi $sp, $sp, " + ((argCount - 4) * 4));
+                    }
+                    
                     if (inst.opCode == IRInstruction.OpCode.CALLR) {
                         storeResult(inst.operands[0], "$v0");
                     }
@@ -258,20 +267,36 @@ public class MipsBackend {
     }
 
     private int getOffset(String varName) {
-        if (!stackOffsets.containsKey(varName)) {
-            stackOffsets.put(varName, currentStackOffset);
-            currentStackOffset += 4;
+        Integer offset = stackOffsets.get(varName);
+        if (offset == null) {
+            throw new RuntimeException("Missing stack offset for variable: " + varName);
         }
-        return stackOffsets.get(varName);
+        return offset;
     }
 
     private void loadOperand(IROperand op, String reg) {
         if (op instanceof IRConstantOperand) {
             out.println("  li " + reg + ", " + ((IRConstantOperand) op).getValueString());
-        } else if (op instanceof IRVariableOperand) {
-            int offset = getOffset(((IRVariableOperand) op).getName());
-            out.println("  lw " + reg + ", " + offset + "($sp)");
+            return;
         }
+
+        if (op instanceof IRVariableOperand) {
+            String name = ((IRVariableOperand) op).getName();
+            int offset = getOffset(name);
+
+            if (arrayVars.contains(name)) {
+                out.println("  addi " + reg + ", $sp, " + offset);
+            } else {
+                out.println("  lw " + reg + ", " + offset + "($sp)");
+            }
+            return;
+        }
+
+        if (op instanceof IRFunctionOperand) {
+            return;
+        }
+
+        throw new RuntimeException("Unsupported operand type: " + op.getClass());
     }
 
     private void storeResult(IROperand op, String reg) {
@@ -282,9 +307,8 @@ public class MipsBackend {
     }
 
     private int calculateStackSpace(IRFunction func) {
-        Set<String> vars = new HashSet<>();
-    
-        // Include parameters in the stack count
+        Set<String> vars = new LinkedHashSet<>(); // preserves order
+
         for (IROperand param : func.parameters) {
             vars.add(((IRVariableOperand)param).getName());
         }
@@ -292,24 +316,38 @@ public class MipsBackend {
         for (IRInstruction inst : func.instructions) {
             for (IROperand op : inst.operands) {
                 if (op instanceof IRVariableOperand) {
-                    vars.add(((IRVariableOperand) op).getName());
+                    String name = ((IRVariableOperand) op).getName();
+                    vars.add(name);
+
+                    // Detect arrays via IR usage
+                    if (inst.opCode == IRInstruction.OpCode.ARRAY_LOAD ||
+                        inst.opCode == IRInstruction.OpCode.ARRAY_STORE) {
+                        if (inst.operands[1] instanceof IRVariableOperand) {
+                            String arrName = ((IRVariableOperand) inst.operands[1]).getName();
+                            arrayVars.add(arrName);
+                        }
+                    }
                 }
             }
         }
-        
-        int space = 4; // for $ra
 
+        stackOffsets.clear();
+        currentStackOffset = 0;
+
+        
         for (String var : vars) {
-            // TEMP: detect arrays (adjust if your IR stores size differently)
+            stackOffsets.put(var, currentStackOffset);
+
             if (var.contains("[")) {
-                space += 400; // assume A[100]
+                currentStackOffset += 400; // assume size 100
             } else {
-                space += 4;
+                currentStackOffset += 4;
             }
         }
 
-        // align to 8 bytes
-        return (space + 7) & ~7;
+        int space = currentStackOffset + 4; // +4 for $ra
+
+        return (space + 7) & ~7; // align
     }
 
     private void generateGreedyBlock(BasicBlock block) {
@@ -380,8 +418,11 @@ public class MipsBackend {
                 }
                 
                 // If the destination isn't in a greedy register, spill it back immediately
-                if (!regMap.containsKey(((IRVariableOperand)inst.operands[0]).getName())) {
-                    storeResult(inst.operands[0], dest);
+                if (isVar(inst.operands[0])) {
+                    String name = getVarName(inst.operands[0]);
+                    if (!regMap.containsKey(name)) {
+                        storeResult(inst.operands[0], dest);
+                    }
                 }
                 break;
 
@@ -389,8 +430,11 @@ public class MipsBackend {
                 String src = getReg(inst.operands[1], "$v0", regMap, true);
                 String target = getReg(inst.operands[0], "$at", regMap, false);
                 out.println("  move " + target + ", " + src);
-                if (!regMap.containsKey(((IRVariableOperand)inst.operands[0]).getName())) {
-                    storeResult(inst.operands[0], target);
+                if (isVar(inst.operands[0])) {
+                    String name = getVarName(inst.operands[0]);
+                    if (!regMap.containsKey(name)) {
+                        storeResult(inst.operands[0], target);
+                    }
                 }
                 break;
 
@@ -465,9 +509,8 @@ public class MipsBackend {
                     String retVal = getReg(inst.operands[0], "$v0", regMap, true);
                     if (!retVal.equals("$v0")) out.println("  move $v0, " + retVal);
                 }
-                int space = calculateStackSpace(currentFunctionReference);
-                out.println("  lw $ra, " + (space - 4) + "($sp)"); // Restore Return Address
-                out.println("  addi $sp, $sp, " + space);
+                out.println("  lw $ra, " + (currentStackSize - 4) + "($sp)");
+                out.println("  addi $sp, $sp, " + currentStackSize);
                 out.println("  jr $ra");
                 break;
 
@@ -481,7 +524,6 @@ public class MipsBackend {
                 break;
 
             case ARRAY_STORE:
-                // IR typically looks like: array_store, base, index, value
                 String valS = getReg(inst.operands[0], "$t2", regMap, true);
                 String baseS = getReg(inst.operands[1], "$t0", regMap, true);
                 String idxS = getReg(inst.operands[2], "$t1", regMap, true);
@@ -501,8 +543,11 @@ public class MipsBackend {
                 out.println("  add $v0, " + baseL + ", $v0");
                 out.println("  lw " + destL + ", 0($v0)");
 
-                if (!regMap.containsKey(((IRVariableOperand)inst.operands[0]).getName())) {
-                    storeResult(inst.operands[0], destL);
+                if (isVar(inst.operands[0])) {
+                    String name = getVarName(inst.operands[0]);
+                    if (!regMap.containsKey(name)) {
+                        storeResult(inst.operands[0], destL);
+                    }
                 }
                 break;
         }
@@ -525,6 +570,11 @@ public class MipsBackend {
                 }
                 return tempReg;
             }
+        }
+
+        
+        if (op instanceof IRFunctionOperand) {
+            return tempReg;
         }
         
         // If it's a label operand being used as a value (which shouldn't happen in valid IR arithmetic)
@@ -609,4 +659,13 @@ public class MipsBackend {
             out.println("  li $t1, 0");
         }
     }
+    
+    private boolean isVar(IROperand op) {
+        return op instanceof IRVariableOperand;
+    }
+
+    private String getVarName(IROperand op) {
+        return ((IRVariableOperand) op).getName();
+    }
+
 }
