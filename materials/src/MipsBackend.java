@@ -75,7 +75,6 @@ public class MipsBackend {
                 }
 
                 String endLabel = function.name + "_end";
-
                 out.println(endLabel + ":");
 
                 // function exit
@@ -155,27 +154,27 @@ public class MipsBackend {
             // branching
             case BREQ:
                 loadBranchOperands(inst);
-                out.println("  beq $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
+                out.println("  beq $t0, $t1, " + getScopedLabel(inst.operands[0]));
                 break;
             
             case BRNEQ:
                 loadBranchOperands(inst);
-                out.println("  bne $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
+                out.println("  bne $t0, $t1, " + getScopedLabel(inst.operands[0]));
                 break;
 
             case BRGT:
                 loadBranchOperands(inst);
-                out.println("  bgt $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
+                out.println("  bgt $t0, $t1, " + getScopedLabel(inst.operands[0]));
                 break;
 
             case BRLT:
                 loadBranchOperands(inst);
-                out.println("  blt $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
+                out.println("  blt $t0, $t1, " + getScopedLabel(inst.operands[0]));
                 break;
 
             case BRGEQ:
                 loadBranchOperands(inst);
-                out.println("  bge $t0, $t1, " + currentFunctionReference.name + "_" + getLabel(inst));
+                out.println("  bge $t0, $t1, " + getScopedLabel(inst.operands[0]));
                 break;
 
             // case BRLE:
@@ -185,13 +184,11 @@ public class MipsBackend {
             //     break;
 
             case LABEL:
-                String label = ((IRLabelOperand)inst.operands[0]).getName();
-                out.println(currentFunctionReference.name + "_" + label + ":");
+                out.println(getScopedLabel(inst.operands[0]) + ":");
                 break;
 
             case GOTO:
-                String target = currentFunctionReference.name + "_" + getLabel(inst);
-                out.println("  j " + target);
+                out.println("  j " + getScopedLabel(inst.operands[0]));
                 break;
 
             // function calls & return
@@ -204,7 +201,11 @@ public class MipsBackend {
 
             case CALL:
             case CALLR:
-                String funcName = getLabel(inst);
+                IROperand funcOp = (inst.opCode == IRInstruction.OpCode.CALLR)
+                    ? inst.operands[1]
+                    : inst.operands[0];
+
+                String funcName = getIdentifier(funcOp);
     
                 if (funcName.equals("print_int") || funcName.equals("puti")) {
                     loadOperand(inst.operands[1], "$a0");
@@ -215,11 +216,13 @@ public class MipsBackend {
                     out.println("  li $v0, 11"); 
                     out.println("  syscall");
                 } else {
-                    int argCount = inst.operands.length - 1;
+                    int argStart = (inst.opCode == IRInstruction.OpCode.CALLR) ? 2 : 1;
+                    int argCount = inst.operands.length - argStart;
 
                     for (int i = 0; i < argCount; i++) {
                         if (i < 4) {
-                            loadOperand(inst.operands[i + 1], "$a" + i);
+                            int base = (inst.opCode == IRInstruction.OpCode.CALLR) ? 2 : 1;
+                            loadOperand(inst.operands[i + base], "$a" + i);
                         } else {
                             loadOperand(inst.operands[i + 1], "$t0");
                             out.println("  addi $sp, $sp, -4");
@@ -227,11 +230,11 @@ public class MipsBackend {
                         }
                     }
 
-                    out.println("  addi $sp, $sp, -4");
-                    out.println("  sw $ra, 0($sp)");
+                    // out.println("  addi $sp, $sp, -4");
+                    // out.println("  sw $ra, 0($sp)");
                     out.println("  jal " + funcName);
-                    out.println("  lw $ra, 0($sp)");
-                    out.println("  addi $sp, $sp, 4");
+                    // out.println("  lw $ra, 0($sp)");
+                    // out.println("  addi $sp, $sp, 4");
                     
                     if (argCount > 4) {
                         out.println("  addi $sp, $sp, " + ((argCount - 4) * 4));
@@ -284,11 +287,8 @@ public class MipsBackend {
             String name = ((IRVariableOperand) op).getName();
             int offset = getOffset(name);
 
-            if (arrayVars.contains(name)) {
-                out.println("  addi " + reg + ", $sp, " + offset);
-            } else {
-                out.println("  lw " + reg + ", " + offset + "($sp)");
-            }
+            out.println("  lw " + reg + ", " + offset + "($sp)");
+
             return;
         }
 
@@ -333,12 +333,11 @@ public class MipsBackend {
 
         stackOffsets.clear();
         currentStackOffset = 0;
-
         
         for (String var : vars) {
             stackOffsets.put(var, currentStackOffset);
 
-            if (var.contains("[")) {
+            if (arrayVars.contains(var)) {
                 currentStackOffset += 400; // assume size 100
             } else {
                 currentStackOffset += 4;
@@ -490,8 +489,11 @@ public class MipsBackend {
 
                     out.println("  jal " + funcName);
                     
-                    // 3. RELOAD after call because child function wiped $t0-$t9
-                    loadGreedyRegisters(regMap);
+                    // Only reload variables that are actually live AFTER the call
+                    for (Map.Entry<String, String> entry : regMap.entrySet()) {
+                        int offset = getOffset(entry.getKey());
+                        out.println("  lw " + entry.getValue() + ", " + offset + "($sp)");
+                    }
 
                     if (isCallR) {
                         IROperand destOp = inst.operands[0];
@@ -509,12 +511,11 @@ public class MipsBackend {
                     String retVal = getReg(inst.operands[0], "$v0", regMap, true);
                     if (!retVal.equals("$v0")) out.println("  move $v0, " + retVal);
                 }
-                out.println("  lw $ra, " + (currentStackSize - 4) + "($sp)");
-                out.println("  addi $sp, $sp, " + currentStackSize);
-                out.println("  jr $ra");
+                out.println("  j " + currentFunctionReference.name + "_end");
                 break;
 
             case LABEL:
+                flushGreedyRegisters(regMap);
                 out.println(getScopedLabel(inst.operands[0]) + ":");
                 break;
 

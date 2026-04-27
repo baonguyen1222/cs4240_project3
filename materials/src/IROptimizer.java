@@ -62,7 +62,7 @@ public class IROptimizer {
         for (IRInstruction inst : function.instructions) {
             // labels start a new basic block
             if (inst.opCode == IRInstruction.OpCode.LABEL) {
-                if (!cur.instructions.isEmpty()) {
+                if (!cur.instructions.isEmpty() && cur.instructions.get(cur.instructions.size() - 1).opCode != IRInstruction.OpCode.LABEL) {
                     cur = new BasicBlock();
                     blocks.add(cur);
                 }
