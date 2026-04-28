@@ -56,8 +56,6 @@ public class MipsBackend {
                 for (int i = 0; i < function.parameters.size(); i++) {
                     if (i < 4) {
                         String paramName = function.parameters.get(i).getName();
-                        // If using greedy and this param is in a regMap, move it there.
-                        // Otherwise, store it to its stack offset.
                         int offset = getOffset(paramName);
                         out.println("  sw $a" + i + ", " + offset + "($sp)");
                     }
@@ -78,10 +76,9 @@ public class MipsBackend {
                     }
                 }
 
-                String endLabel = function.name + "_exit";
-                out.println(endLabel + ":");
+                out.println(function.name + "_return:");
+                out.println(function.name + "_end:");
 
-                // function exit
                 if (function.name.equals("main")) {
                     out.println("  li $v0, 10");
                     out.println("  syscall");
@@ -179,12 +176,6 @@ public class MipsBackend {
                 out.println("  bge $t0, $t1, " + getScopedLabel(inst.operands[0]));
                 break;
 
-            // case BRLE:
-            //     loadOperand(inst.operands[1], "$t0");
-            //     loadOperand(inst.operands[2], "$t1");
-            //     out.println("  ble $t0, $t1, " + ((IRLabelOperand)inst.operands[0]).getName());
-            //     break;
-
             case LABEL:
                 out.println(getScopedLabel(inst.operands[0]) + ":");
                 break;
@@ -198,7 +189,7 @@ public class MipsBackend {
                 if (inst.operands.length > 0) {
                     loadOperand(inst.operands[0], "$v0");
                 }
-                out.println("  j " + currentFunctionReference.name + "_exit");
+                out.println("  j " + currentFunctionReference.name + "_return");
                 return;
 
             case CALL:
@@ -300,13 +291,17 @@ public class MipsBackend {
             if (arrayVars.contains(name)) {
                 boolean isParam = currentFunctionReference.parameters.stream()
                     .anyMatch(p -> ((IRVariableOperand) p).getName().equals(name));
+
                 if (isParam) {
-                    out.println("  lw " + reg + ", " + offset + "($sp)");   // load passed-in pointer
+                    // parameter = already a pointer → load it
+                    out.println("  lw " + reg + ", " + offset + "($sp)");
                 } else {
-                    out.println("  addiu " + reg + ", $sp, " + offset);     // compute local array address
+                    // local array = stack block → compute address
+                    out.println("  addiu " + reg + ", $sp, " + offset);
                 }
             } else {
-                out.println("  lw " + reg + ", " + offset + "($sp)");       // normal scalar load
+                // normal scalar
+                out.println("  lw " + reg + ", " + offset + "($sp)");
             }
             return;
         }
@@ -387,7 +382,6 @@ public class MipsBackend {
             }
         }
 
-        // 2. Assign top 8 vars to $t0-$t7 ($t8/$t9 reserved as scratch)
         List<String> sortedVars = new ArrayList<>(frequency.keySet());
         sortedVars.sort((a, b) -> frequency.get(b) - frequency.get(a));
 
@@ -395,10 +389,11 @@ public class MipsBackend {
         int regIdx = 0;
         for (String var : sortedVars) {
             if (regIdx > 7) break;
+            if (arrayVars.contains(var)) continue;  // never put arrays in registers
             regMap.put(var, "$t" + regIdx++);
         }
 
-        // 3. Only load vars that are live-in (have meaningful values entering this block)
+        // load live-in scalars only
         for (Map.Entry<String, String> entry : regMap.entrySet()) {
             if (liveIn.contains(entry.getKey())) {
                 int offset = getOffset(entry.getKey());
@@ -406,12 +401,11 @@ public class MipsBackend {
             }
         }
 
-        // 4. Generate instructions
         for (IRInstruction inst : block.instructions) {
             generateGreedyInst(inst, regMap);
         }
 
-        // 5. Only store vars that are live-out (needed by successors)
+        // store live-out scalars only
         for (Map.Entry<String, String> entry : regMap.entrySet()) {
             if (liveOut.contains(entry.getKey())) {
                 int offset = getOffset(entry.getKey());
@@ -468,7 +462,6 @@ public class MipsBackend {
             case BRGT:
             case BRLT:
             case BRGEQ:
-            // case BRLE:
                 String targetLabel = getScopedLabel(inst.operands[0]); 
                 String bLeft = getReg(inst.operands[1], "$t8", regMap, true);
                 String bRight = getReg(inst.operands[2], "$t9", regMap, true);
@@ -489,21 +482,29 @@ public class MipsBackend {
                 String funcName = getIdentifier(funcOp);
                 
                 if (funcName.equals("printi") || funcName.equals("puti") || funcName.equals("putc")) {
-                    // For CALL: arg is at index 1. For CALLR: arg would be at index 2.
                     int argIndex = isCallR ? 2 : 1;
-                    String val = getReg(inst.operands[argIndex], "$a0", regMap, true);
-                    if (!val.equals("$a0")) out.println("  move $a0, " + val);
+                    loadOperand(inst.operands[argIndex], "$a0");
                     if (funcName.equals("putc")) {
                         out.println("  li $v0, 11");
                     } else {
                         out.println("  li $v0, 1");
                     }
                     out.println("  syscall");
-                } 
+                } else if (funcName.equals("geti")) {
+                    out.println("  li $v0, 5");
+                    out.println("  syscall");
+                    if (isCallR) {
+                        IROperand destOp = inst.operands[0];
+                        String destReg = getReg(destOp, "$t8", regMap, false);
+                        out.println("  move " + destReg + ", $v0");
+                        if (!regMap.containsKey(((IRVariableOperand)destOp).getName())) {
+                            storeResult(destOp, destReg);
+                        }
+                    }
+                }
                 else {
                     flushGreedyRegisters(regMap); 
         
-                    // Setup arguments (ensure you use the right indices from your IR)
                     int argStart = isCallR ? 2 : 1;
                     for (int i = argStart; i < inst.operands.length; i++) {
                         int argRegIdx = i - argStart;
@@ -537,7 +538,7 @@ public class MipsBackend {
                     String retVal = getReg(inst.operands[0], "$v0", regMap, true);
                     if (!retVal.equals("$v0")) out.println("  move $v0, " + retVal);
                 }
-                out.println("  j " + currentFunctionReference.name + "_exit");
+                out.println("  j " + currentFunctionReference.name + "_return");
                 break;
 
             case LABEL:
@@ -579,7 +580,6 @@ public class MipsBackend {
             return tempReg;
         } 
         
-        // Safety check: ensure it's actually a variable before casting
         if (op instanceof IRVariableOperand) {
             String varName = ((IRVariableOperand) op).getName();
             if (regMap.containsKey(varName)) {
@@ -597,7 +597,6 @@ public class MipsBackend {
             return tempReg;
         }
         
-        // If it's a label operand being used as a value (which shouldn't happen in valid IR arithmetic)
         return tempReg; 
     }
 
@@ -654,7 +653,6 @@ public class MipsBackend {
                 return ((IRLabelOperand) op).getName();
             }
         }
-        // Fallback: use the last operand if no Label type is found
         return inst.operands[inst.operands.length - 1].toString();
     }
 
@@ -663,16 +661,12 @@ public class MipsBackend {
             if (op instanceof IRLabelOperand) return ((IRLabelOperand) op).getName();
             if (op instanceof IRFunctionOperand) return ((IRFunctionOperand) op).getName();
         }
-        // If no specific operand is found, the label is usually the last one
         return inst.operands[inst.operands.length - 1].toString();
     }
 
     private void loadBranchOperands(IRInstruction inst) {
-        // Always load the first operand into $t0
         loadOperand(inst.operands[1], "$t0");
-        
-        // If there is a second variable before the label, load it into $t1
-        // Otherwise, compare against zero
+
         if (inst.operands.length > 2) {
             loadOperand(inst.operands[2], "$t1");
         } else {
@@ -703,13 +697,11 @@ public class MipsBackend {
             for (int i = blocks.size() - 1; i >= 0; i--) {
                 BasicBlock b = blocks.get(i);
 
-                // liveOut[b] = union of liveIn of all successors
                 Set<String> newOut = new HashSet<>();
                 for (BasicBlock succ : b.successors) {
                     newOut.addAll(liveIn.get(succ));
                 }
 
-                // compute use and def for this block
                 Set<String> use = new HashSet<>();
                 Set<String> def = new HashSet<>();
                 for (IRInstruction inst : b.instructions) {
@@ -725,7 +717,6 @@ public class MipsBackend {
                     }
                 }
 
-                // liveIn[b] = use union (liveOut[b] - def)
                 Set<String> newIn = new HashSet<>(use);
                 Set<String> outMinusDef = new HashSet<>(newOut);
                 outMinusDef.removeAll(def);
