@@ -20,7 +20,7 @@ public class MipsBackend {
 
         IRReader reader = new IRReader();
         IRProgram program = reader.parseIRFile(args[0]);
-        boolean useGreedy = args[2].equals("--greedy");
+        boolean useGreedy = args[2].equals("--greedy") || args[2].equals("greedy");
 
         MipsBackend backend = new MipsBackend();
         backend.generateMIPS(program, args[1], useGreedy);
@@ -76,8 +76,8 @@ public class MipsBackend {
                     }
                 }
 
-                out.println(function.name + "_return:");
-                out.println(function.name + "_end:");
+                out.println("__" + function.name + "_return:");
+                out.println("__" + function.name + "_end:");
 
                 if (function.name.equals("main")) {
                     out.println("  li $v0, 10");
@@ -188,8 +188,8 @@ public class MipsBackend {
             case RETURN:
                 if (inst.operands.length > 0) {
                     loadOperand(inst.operands[0], "$v0");
-                }
-                out.println("  j " + currentFunctionReference.name + "_return");
+                }out.println("  j __" + currentFunctionReference.name + "_return");
+                
                 return;
 
             case CALL:
@@ -393,7 +393,16 @@ public class MipsBackend {
             regMap.put(var, "$t" + regIdx++);
         }
 
-        // load live-in scalars only
+        int startIndex = 0;
+
+        if (!block.instructions.isEmpty()
+                && block.instructions.get(0).opCode == IRInstruction.OpCode.LABEL) {
+            IRInstruction labelInst = block.instructions.get(0);
+            out.println(getScopedLabel(labelInst.operands[0]) + ":");
+            startIndex = 1;
+        }
+
+        // load live-in scalars AFTER label
         for (Map.Entry<String, String> entry : regMap.entrySet()) {
             if (liveIn.contains(entry.getKey())) {
                 int offset = getOffset(entry.getKey());
@@ -401,16 +410,8 @@ public class MipsBackend {
             }
         }
 
-        for (IRInstruction inst : block.instructions) {
-            generateGreedyInst(inst, regMap);
-        }
-
-        // store live-out scalars only
-        for (Map.Entry<String, String> entry : regMap.entrySet()) {
-            if (liveOut.contains(entry.getKey())) {
-                int offset = getOffset(entry.getKey());
-                out.println("  sw " + entry.getValue() + ", " + offset + "($sp)");
-            }
+        for (int i = startIndex; i < block.instructions.size(); i++) {
+            generateGreedyInst(block.instructions.get(i), regMap);
         }
     }
 
@@ -421,7 +422,7 @@ public class MipsBackend {
             case MULT:
             case DIV:
             case AND:
-            case OR:
+            case OR: {
                 String left = getReg(inst.operands[1], "$t8", regMap, true);
                 String right = getReg(inst.operands[2], "$t9", regMap, true);
                 String dest = getReg(inst.operands[0], "$t8", regMap, false);
@@ -438,23 +439,18 @@ public class MipsBackend {
                 
                 // If the destination isn't in a greedy register, spill it back immediately
                 if (isVar(inst.operands[0])) {
-                    String name = getVarName(inst.operands[0]);
-                    if (!regMap.containsKey(name)) {
-                        storeResult(inst.operands[0], dest);
-                    }
+                    storeResult(inst.operands[0], dest);
                 }
                 break;
+            }
 
             case ASSIGN:
                 String src = getReg(inst.operands[1], "$t8", regMap, true);
                 String target = getReg(inst.operands[0], "$t8", regMap, false);
                 out.println("  move " + target + ", " + src);
                 if (isVar(inst.operands[0])) {
-                    String name = getVarName(inst.operands[0]);
-                    if (!regMap.containsKey(name)) {
-                        storeResult(inst.operands[0], target);
-                    }
-                }
+                    storeResult(inst.operands[0], target);
+                }       
                 break;
 
             case BREQ:
@@ -471,7 +467,7 @@ public class MipsBackend {
                 if (branchOp.equals("bneq")) branchOp = "bne";
                 if (branchOp.equals("bgeq")) branchOp = "bge";
 
-                flushGreedyRegisters(regMap); // Save state because we might jump
+
                 out.println("  " + branchOp + " " + bLeft + ", " + bRight + ", " + targetLabel);
                 break;
 
@@ -497,9 +493,7 @@ public class MipsBackend {
                         IROperand destOp = inst.operands[0];
                         String destReg = getReg(destOp, "$t8", regMap, false);
                         out.println("  move " + destReg + ", $v0");
-                        if (!regMap.containsKey(((IRVariableOperand)destOp).getName())) {
-                            storeResult(destOp, destReg);
-                        }
+                        storeResult(destOp, destReg);
                     }
                 }
                 else {
@@ -526,9 +520,7 @@ public class MipsBackend {
                         IROperand destOp = inst.operands[0];
                         String retDestReg = getReg(destOp, "$v0", regMap, false);
                         if (!retDestReg.equals("$v0")) out.println("  move " + retDestReg + ", $v0");
-                        if (!regMap.containsKey(((IRVariableOperand)destOp).getName())) {
-                            storeResult(destOp, "$v0");
-                        }
+                        storeResult(destOp, retDestReg);
                     }
                 }
                 break;
@@ -538,16 +530,15 @@ public class MipsBackend {
                     String retVal = getReg(inst.operands[0], "$v0", regMap, true);
                     if (!retVal.equals("$v0")) out.println("  move $v0, " + retVal);
                 }
-                out.println("  j " + currentFunctionReference.name + "_return");
+                out.println("  j __" + currentFunctionReference.name + "_return");
                 break;
 
             case LABEL:
-                flushGreedyRegisters(regMap);
+
                 out.println(getScopedLabel(inst.operands[0]) + ":");
                 break;
 
             case GOTO:
-                flushGreedyRegisters(regMap); // Save state before jumping away
                 out.println("  j " + getScopedLabel(inst.operands[0]));
                 break;
 
@@ -567,7 +558,7 @@ public class MipsBackend {
                 out.println("  sll $t9, " + idxL + ", 2");
                 out.println("  add $t9, " + baseL + ", $t9");
                 out.println("  lw " + destL + ", 0($t9)");
-                if (isVar(inst.operands[0]) && !regMap.containsKey(getVarName(inst.operands[0]))) {
+                if (isVar(inst.operands[0])) {
                     storeResult(inst.operands[0], destL);
                 }
                 break;
@@ -635,6 +626,7 @@ public class MipsBackend {
 
     private void flushGreedyRegisters(Map<String, String> regMap) {
         for (Map.Entry<String, String> entry : regMap.entrySet()) {
+            if (arrayVars.contains(entry.getKey())) continue;
             int offset = getOffset(entry.getKey());
             out.println("  sw " + entry.getValue() + ", " + offset + "($sp)");
         }
